@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Emotion AI</title>
+    <style>
+        body { font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; background: #1a1a1a; color: #fff; margin-top: 50px;}
+        #canvas-container { position: relative; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.8); }
+        #status { margin-top: 15px; font-weight: 500; color: #888; letter-spacing: 1px; }
+    </style>
+</head>
+<body>
+    <h2>Emotion Analyzer</h2>
+    <div id="canvas-container">
+        <video id="video" width="640" height="480" autoplay style="display:none;"></video>
+        <canvas id="canvas" width="640" height="480"></canvas>
+    </div>
+    <div id="status">Requesting Camera Access...</div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+        let socket;
+        let trackedFaces = [];
+
+        // 1. Initialize Webcam
+        navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+            .then(stream => { video.srcObject = stream; })
+            .catch(err => { statusDiv.innerText = "Camera access denied."; });
+
+        // 2. Initialize WebSocket Connection
+        function connectWS() {
+            socket = new WebSocket('ws://localhost:8000/ws/emotions');
+            
+            socket.onopen = () => { statusDiv.innerText = "Connected: Analyzing..."; };
+            
+            socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.status === 'success') {
+                    trackedFaces = data.faces;
+                    statusDiv.innerText = `Tracking ${trackedFaces.length} face(s)`;
+                } else if (data.status === 'no_face') {
+                    trackedFaces = [];
+                    statusDiv.innerText = "No face detected. Please step into frame.";
+                }
+            };
+            
+            socket.onclose = () => { 
+                statusDiv.innerText = "Connection lost. Reconnecting..."; 
+                setTimeout(connectWS, 2000); 
+            };
+        }
+        connectWS();
+
+        // 3. Transmission Loop (10 Frames Per Second)
+        // Sending 60fps over websockets will choke the server. 10fps is plenty for ML.
+        setInterval(() => {
+            if (socket.readyState === WebSocket.OPEN && video.readyState === video.HAVE_ENOUGH_DATA) {
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = canvas.width; 
+                tempCanvas.height = canvas.height;
+                tempCanvas.getContext('2d').drawImage(video, 0, 0);
+                // Compress to JPEG at 50% quality to ensure near-zero latency
+                socket.send(tempCanvas.toDataURL('image/jpeg', 0.5)); 
+            }
+        }, 100);
+
+        // 4. Render Loop (60 Frames Per Second)
+        function render() {
+            if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                // Draw live video
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                
+                // UI Polish: Dim screen if no face is detected
+                if (trackedFaces.length === 0) {
+                    ctx.fillStyle = "rgba(0,0,0,0.4)";
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                }
+
+                // Draw bounding boxes for multiple faces
+                trackedFaces.forEach(face => {
+                    const [x, y, w, h] = face.box;
+                    const emotion = face.emotion.toUpperCase();
+                    
+                    // UI Polish: Color-code the emotions
+                    const colors = { HAPPY: "#2ecc71", SAD: "#3498db", ANGRY: "#e74c3c", SURPRISE: "#f1c40f", NEUTRAL: "#ecf0f1", FEAR: "#9b59b6", DISGUST: "#e67e22" };
+                    ctx.strokeStyle = colors[emotion] || "#00ffff";
+                    ctx.lineWidth = 3;
+                    
+                    // Box
+                    ctx.strokeRect(x, y, w, h);
+                    
+                    // Label Tag
+                    ctx.fillStyle = ctx.strokeStyle;
+                    ctx.fillRect(x, y - 30, w, 30);
+                    
+                    // Label Text
+                    ctx.fillStyle = "#000";
+                    ctx.font = "bold 16px sans-serif";
+                    ctx.fillText(`${emotion} (${Math.round(face.confidence * 100)}%)`, x + 8, y - 9);
+                });
+            }
+            requestAnimationFrame(render); // Smooth hardware-accelerated looping
+        }
+        render();
+    </script>
+</body>
+</html>
